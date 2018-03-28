@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import torch
+import cv2
 
 def point_form(boxes):
     """ Convert prior_boxes to (xmin, ymin, xmax, ymax)
@@ -109,6 +110,113 @@ def match(threshold, truths, priors, variances, labels, loc_t, conf_t, idx):
     loc = encode(matches, priors, variances)
     loc_t[idx] = loc    # [num_priors,4] encoded offsets to learn
     conf_t[idx] = conf  # [num_priors] top class label for each prior
+
+def bbox_overlaps(boxes,query_boxes):
+    """
+    Parameters
+    ----------
+    boxes: (N, 4) ndarray of float
+    query_boxes: (K, 4) ndarray of float
+    Returns
+    -------
+    overlaps: (N, K) ndarray of overlap between boxes and query_boxes
+    """
+
+    N = boxes.size(0)
+    K = query_boxes.size(0)
+    overlaps = torch.FloatTensor(N, K)
+    overlaps[:] = 0
+ 
+    for k in range(K):
+        box_area = (
+            (query_boxes[k, 2]*300 - query_boxes[k, 0]*300 + 1) *
+            (query_boxes[k, 3]*300 - query_boxes[k, 1]*300 + 1)
+        )
+        for n in range(N):
+            iw = (
+                min(boxes[n, 2]*300, query_boxes[k, 2]*300) -
+                max(boxes[n, 0]*300, query_boxes[k, 0]*300) + 1
+            )
+            if iw > 0:
+                ih = (
+                    min(boxes[n, 3]*300, query_boxes[k, 3]*300) -
+                    max(boxes[n, 1]*300, query_boxes[k, 1]*300) + 1
+                )
+                if ih > 0:
+                    ua = float(
+                        (boxes[n, 2]*300 - boxes[n, 0]*300 + 1) *
+                        (boxes[n, 3]*300 - boxes[n, 1]*300 + 1) +
+                        box_area - iw * ih
+                    )
+                    overlaps[n, k] = iw * ih / ua
+    return overlaps.cuda()
+
+def vis(img, proposal, truth, idx):
+    im = img.cpu().data
+    im = im.numpy()
+    im = im.transpose(1,2,0)
+    img = im[:, :, (2, 1, 0)]
+    im = img.copy()
+    for i in range(truth.size(0)):
+        bbox = truth[i,:]
+     
+        cv2.rectangle(im, (int(bbox[0]*300), int(bbox[1]*300)),(int(bbox[2]*300), int(bbox[3]*300)),(0,255,0),1)
+    for j in range(proposal.size(0)):
+        cv2.rectangle(im, (int(proposal[j][0]*300), int(proposal[j][1]*300)), (int(proposal[j][2]*300), int(proposal[j][3]*300)),(255,255,255),1)
+
+    cv2.imwrite('./vis/'+str(idx)+'.jpg', im)
+
+
+
+def match_proposal(threshold, img, truths, the_proposal, labels, cls_t, idx, h, w):
+    """Match each prior box with the ground truth box of the highest jaccard
+    overlap, encode the bounding boxes, then return the matched indices
+    corresponding to both confidence and location preds.
+    Args:
+        threshold: (float) The overlap threshold used when mathing boxes.
+        truths: (tensor) Ground truth boxes, Shape: [num_obj, num_priors].
+        priors: (tensor) Prior boxes from priorbox layers, Shape: [n_priors,4].
+        variances: (tensor) Variances corresponding to each prior coord,
+            Shape: [num_priors, 4].
+        labels: (tensor) All the class labels for the image, Shape: [num_obj].
+        loc_t: (tensor) Tensor to be filled w/ endcoded location targets.
+        conf_t: (tensor) Tensor to be filled w/ matched indices for conf preds.
+        idx: (int) current batch index
+    Return:
+        The matched indices corresponding to 1)location and 2)confidence preds.
+    """
+
+  
+
+    #overlaps = bbox_overlaps(
+    #    truths,
+    #    the_proposal
+    #)
+    overlaps = jaccard(
+        truths,
+        the_proposal
+    )
+
+    best_prior_overlap, best_prior_idx = overlaps.max(1, keepdim=True)
+    # print('best_prior_idx: ',best_prior_idx.size()) #(n,1)
+    # [1,num_priors] best ground truth for each prior
+    best_truth_overlap, best_truth_idx = overlaps.max(0, keepdim=True)
+    # print('best_truth_idx: ',best_truth_idx.size()) #(1,100)
+    best_truth_idx.squeeze_(0)
+    best_truth_overlap.squeeze_(0)
+    # print(best_truth_idx.squeeze_(0).size()) #(100)
+    best_prior_idx.squeeze_(1) # shape (n)
+   
+    best_prior_overlap.squeeze_(1) #shape (n)
+    best_truth_overlap.index_fill_(0, best_prior_idx, 2)  # ensure best prior
+    # TODO refactor: index  best_prior_idx with long tensor
+    # ensure every gt matches with its prior of max overlap
+    for j in range(best_prior_idx.size(0)):
+        best_truth_idx[best_prior_idx[j]] = j
+    #matches = truths[best_truth_idx]          # Shape: [num_priors,4]
+    conf = labels[best_truth_idx] + 1         # Shape: [num_priors]
+    conf[best_truth_overlap < threshold] = 0  # label as background
+    cls_t[idx] = conf  # [num_priors] top class label for each prior
 
 
 def encode(matched, priors, variances):

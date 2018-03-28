@@ -14,6 +14,11 @@ from ssd import build_ssd
 import numpy as np
 import time
 
+import os
+os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"]="1"
+
+
 def str2bool(v):
     return v.lower() in ("yes", "true", "t", "1")
 
@@ -21,7 +26,7 @@ parser = argparse.ArgumentParser(description='Single Shot MultiBox Detector Trai
 parser.add_argument('--version', default='v2', help='conv11_2(v2) or pool6(v1) as last layer')
 parser.add_argument('--basenet', default='vgg16_reducedfc.pth', help='pretrained base model')
 parser.add_argument('--jaccard_threshold', default=0.5, type=float, help='Min Jaccard index for matching')
-parser.add_argument('--batch_size', default=32, type=int, help='Batch size for training')
+parser.add_argument('--batch_size', default=16, type=int, help='Batch size for training')
 parser.add_argument('--resume', default=None, type=str, help='Resume from checkpoint')
 parser.add_argument('--num_workers', default=4, type=int, help='Number of workers used in dataloading')
 parser.add_argument('--iterations', default=120000, type=int, help='Number of training iterations')
@@ -53,6 +58,7 @@ train_sets = [('2007', 'trainval'), ('2012', 'trainval')]
 ssd_dim = 300  # only support 300 now
 means = (104, 117, 123)  # only support voc now
 num_classes = len(VOC_CLASSES) + 1
+num_classes = 2
 batch_size = args.batch_size
 accum_batch_size = 32
 iter_size = accum_batch_size / batch_size
@@ -67,7 +73,8 @@ if args.visdom:
     viz = visdom.Visdom()
 
 ssd_net = build_ssd('train', 300, num_classes)
-net = ssd_net
+#net = ssd_net
+net = torch.nn.DataParallel(ssd_net)
 
 if args.cuda:
     net = torch.nn.DataParallel(ssd_net)
@@ -80,6 +87,9 @@ else:
     vgg_weights = torch.load(args.save_folder + args.basenet)
     print('Loading base network...')
     ssd_net.vgg.load_state_dict(vgg_weights)
+
+#vgg_weights = torch.load(args.save_folder + args.basenet)
+#ssd_net.vgg.load_state_dict(vgg_weights)
 
 if args.cuda:
     net = net.cuda()
@@ -101,7 +111,23 @@ if not args.resume:
     ssd_net.extras.apply(weights_init)
     ssd_net.loc.apply(weights_init)
     ssd_net.conf.apply(weights_init)
+    ssd_net.extras_lstd.apply(weights_init)
+    ssd_net.classifier.apply(weights_init)
 
+'''
+if args.resume:
+    print('Resuming training, loading {}...'.format(args.resume))
+    model_dict = ssd_net.state_dict()
+    pretrained_dict = torch.load(args.resume)
+    pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+    # 2. overwrite entries in the existing state dict
+    model_dict.update(pretrained_dict) 
+    # 3. load the new state dict
+    ssd_net.load_state_dict(model_dict)
+    ssd_net.extras_lstd.apply(weights_init)
+    ssd_net.classifier.apply(weights_init)
+    print('Loading base network...')
+'''
 optimizer = optim.SGD(net.parameters(), lr=args.lr,
                       momentum=args.momentum, weight_decay=args.weight_decay)
 criterion = MultiBoxLoss(num_classes, 0.5, True, 0, True, 3, 0.5, False, args.cuda)
@@ -167,7 +193,10 @@ def train():
             epoch += 1
 
         # load train data
-        images, targets = next(batch_iterator)
+        #images, targets = next(batch_iterator)
+        
+        images, targets, h, w, im_ids, im_vis = next(batch_iterator)
+        #print(height)
 
         if args.cuda:
             images = Variable(images.cuda())
@@ -177,11 +206,16 @@ def train():
             targets = [Variable(anno, volatile=True) for anno in targets]
         # forward
         t0 = time.time()
-        out = net(images)
+        #out, cls_out = net(images)
+        out, cls_output, proposal= net(images)
+         
+        #print(images.size()) 32, 3, 300, 300
+        
         # backprop
         optimizer.zero_grad()
-        loss_l, loss_c = criterion(out, targets)
-        loss = loss_l + loss_c
+        loss_l, loss_c, loss_cls = criterion(out, cls_output, proposal, targets, images, im_ids, im_vis, h, w)
+        loss = loss_l + loss_c + loss_cls
+ 
         loss.backward()
         optimizer.step()
         t1 = time.time()
@@ -189,7 +223,8 @@ def train():
         conf_loss += loss_c.data[0]
         if iteration % 10 == 0:
             print('Timer: %.4f sec.' % (t1 - t0))
-            print('iter ' + repr(iteration) + ' || Loss: %.4f ||' % (loss.data[0]), end=' ')
+            #print('iter ' + repr(iteration) + ' || Loss_total: %.4f ||' % (loss.data[0]), end=' ')
+            print('iter ' + repr(iteration) + ' || Loss_total: %.4f ||' % (loss.data[0])+ ' || Loss_cls: %.4f ||' % (loss_cls.data[0]), end=' ')
             if args.visdom and args.send_images_to_visdom:
                 random_batch_index = np.random.randint(images.size(0))
                 viz.image(images.data[random_batch_index].cpu().numpy())
@@ -212,7 +247,7 @@ def train():
                 )
         if iteration % 5000 == 0:
             print('Saving state, iter:', iteration)
-            torch.save(ssd_net.state_dict(), 'weights/ssd300_0712_' +
+            torch.save(ssd_net.state_dict(), 'weights/lstd300_0712_' +
                        repr(iteration) + '.pth')
     torch.save(ssd_net.state_dict(), args.save_folder + '' + args.version + '.pth')
 

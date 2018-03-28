@@ -5,7 +5,26 @@ from torch.autograd import Variable
 from layers import *
 from data import v2
 import os
+#from layers.roi_pooling.roi_pool import RoIPoolFunction
+from layers.functions.post_rois import Post_rois
+from layers.roi_pooling import roi_pooling as _roi_pooling
 
+def roi_pooling(input, rois, size=(7,7), spatial_scale=1.0):
+    assert(rois.dim() == 2)
+    assert(rois.size(1) == 5)
+    output = []
+    rois = rois.data.float()
+    num_rois = rois.size(0)
+    
+    rois[:,1:].mul_(spatial_scale)
+    rois = rois.long()
+    for i in range(num_rois):
+        roi = rois[i]
+        im_idx = roi[0]
+        im = input.narrow(0, im_idx, 1)[..., roi[2]:(roi[4]+1), roi[1]:(roi[3]+1)]
+        output.append(F.adaptive_max_pool2d(im, size))
+
+    return torch.cat(output, 0)
 
 class SSD(nn.Module):
     """Single Shot Multibox Architecture
@@ -24,7 +43,8 @@ class SSD(nn.Module):
         head: "multibox head" consists of loc and conf conv layers
     """
 
-    def __init__(self, phase, base, extras, head, num_classes):
+    def __init__(self, phase, base, extras, head, extras_lstd, num_classes):
+    #def __init__(self, phase, base, extras, head, num_classes):
         super(SSD, self).__init__()
         self.phase = phase
         self.num_classes = num_classes
@@ -42,9 +62,17 @@ class SSD(nn.Module):
         self.loc = nn.ModuleList(head[0])
         self.conf = nn.ModuleList(head[1])
 
-        if phase == 'test':
-            self.softmax = nn.Softmax(dim=-1)
-            self.detect = Detect(num_classes, 0, 200, 0.01, 0.45)
+        self.extras_lstd = nn.ModuleList(extras_lstd)
+        self.classifier = nn.ModuleList([nn.Linear(256*3*3, 21)])
+    
+        self.softmax = nn.Softmax(dim=-1)
+        self.post_rois = Post_rois(num_classes, 0, 100, 0, 0.65)
+
+        self.detect = Detect(num_classes, 0, 100, 0, 0.65)
+        #self.ROI_POOL = RoIPoolFunction(5, 5, 1.0/19.0)
+        self.roi_pooling = _roi_pooling       
+
+
 
     def forward(self, x):
         """Applies network layers and ops on input image(s) x.
@@ -68,6 +96,7 @@ class SSD(nn.Module):
         sources = list()
         loc = list()
         conf = list()
+ 
 
         # apply vgg up to conv4_3 relu
         for k in range(23):
@@ -94,6 +123,7 @@ class SSD(nn.Module):
 
         loc = torch.cat([o.view(o.size(0), -1) for o in loc], 1)
         conf = torch.cat([o.view(o.size(0), -1) for o in conf], 1)
+        '''
         if self.phase == "test":
             output = self.detect(
                 loc.view(loc.size(0), -1, 4),                   # loc preds
@@ -107,14 +137,49 @@ class SSD(nn.Module):
                 conf.view(conf.size(0), -1, self.num_classes),
                 self.priors
             )
-        return output
+        '''
+        
+        rpn_output = (
+                loc.view(loc.size(0), -1, 4),
+                conf.view(conf.size(0), -1, self.num_classes),
+                self.priors
+        )
+        
+        rois = self.post_rois(
+                loc.view(loc.size(0), -1, 4),                   # loc preds
+                self.softmax(conf.view(conf.size(0), -1,
+                    self.num_classes)),                         # conf preds
+                self.priors.type(type(x.data))                  # default boxes
+            ) # rois.size (32,1,100,5) 5:
+      
+        rois = rois.contiguous().view(-1,5)
+        
+        proposal = rois.clone()
+
+        rois[:,1:] = rois[:,1:]*300
+    
+        #x =  self.ROI_POOL(sources[1], rois)
+        x = self.roi_pooling(sources[1], rois, (5,5), 1.0/16.0)
+
+        for k, v in enumerate(self.extras_lstd):
+            x = v(x)
+      
+        x = x.view(x.size(0), -1)
+        cls_output = self.classifier[0](x)
+
+        if self.phase == "train": 
+            return rpn_output, cls_output, proposal
+        else:
+            return cls_output, proposal
+            #return rpn_output
 
     def load_weights(self, base_file):
         other, ext = os.path.splitext(base_file)
         if ext == '.pkl' or '.pth':
             print('Loading weights into state dict...')
             self.load_state_dict(torch.load(base_file,
-                                 map_location=lambda storage, loc: storage))
+                       map_location=lambda storage, loc: storage))
+ 
             print('Finished!')
         else:
             print('Sorry only .pth and .pkl files supported.')
@@ -161,6 +226,24 @@ def add_extras(cfg, i, batch_norm=False):
         in_channels = v
     return layers
 
+def add_lstd_extras(i):
+    # Extra layers added to VGG for feature scaling
+    layers = []
+    in_channels = i
+    conv_add1 = nn.Conv2d(in_channels, 256,
+                           kernel_size=3, stride=1, padding=1)
+
+    in_channels = 256
+    batchnorm_add1 = nn.BatchNorm2d(in_channels)
+    conv_add2 = nn.Conv2d(in_channels, 256,
+                           kernel_size=3, stride=2, padding=1)
+
+    batchnorm_add2 = nn.BatchNorm2d(in_channels)
+    #bbox_score_voc = nn.Linear(256, 21)
+
+    layers += [conv_add1, batchnorm_add1, nn.ReLU(inplace=True), conv_add2, batchnorm_add2, nn.ReLU(inplace=True)]
+    return layers
+
 
 def multibox(vgg, extra_layers, cfg, num_classes):
     loc_layers = []
@@ -204,4 +287,6 @@ def build_ssd(phase, size=300, num_classes=21):
     base_, extras_, head_ = multibox(vgg(base[str(size)], 3),
                                      add_extras(extras[str(size)], 1024),
                                      mbox[str(size)], num_classes)
-    return SSD(phase, base_, extras_, head_, num_classes)
+    extras_lstd_ = add_lstd_extras(1024)
+    #return SSD(phase, base_, extras_, head_, num_classes)
+    return SSD(phase, base_, extras_, head_, extras_lstd_, num_classes)

@@ -34,7 +34,7 @@ def str2bool(v):
     return v.lower() in ("yes", "true", "t", "1")
 
 parser = argparse.ArgumentParser(description='Single Shot MultiBox Detection')
-parser.add_argument('--trained_model', default='weights/ssd300_mAP_77.43_v2.pth',
+parser.add_argument('--trained_model', default='weights/v2.pth',
                     type=str, help='Trained state_dict file path to open')
 parser.add_argument('--save_folder', default='eval/', type=str,
                     help='File path to save results')
@@ -348,7 +348,28 @@ cachedir: Directory for caching the annotations
 
     return rec, prec, ap
 
-
+def vis_detections(im, index, dets, thresh=0.8):
+    '''
+    import numpy as np
+    import matplotlib.pyplot as plt
+    npimg = im.cpu().numpy()
+    npimg = (npimg + 128)/255
+    print(npimg)
+    print('here')
+    plt.imshow(np.transpose(npimg, (1, 2, 0)))
+    plt.show()
+    '''
+    im = im.transpose(1,2,0)
+    im = im.copy() 
+    """Visual debugging of detections."""
+    for i in range(np.minimum(10, dets.shape[0])):
+        bbox = tuple(int(np.round(x)) for x in dets[i, :4])
+        score = dets[i, -1]
+        if score > thresh:
+            cv2.rectangle(im, (bbox[0],bbox[1]), (bbox[2], bbox[3]), (0, 204, 0), 2)
+    cv2.imwrite('./vis/test'+index+'.jpg', im)
+       
+ 
 def test_net(save_folder, net, cuda, dataset, transform, top_k,
              im_size=300, thresh=0.05):
     """Test a Fast R-CNN network on an image database."""
@@ -365,32 +386,34 @@ def test_net(save_folder, net, cuda, dataset, transform, top_k,
     det_file = os.path.join(output_dir, 'detections.pkl')
 
     for i in range(num_images):
-        im, gt, h, w = dataset.pull_item(i)
+        im, gt, h, w, im_id, im_vis = dataset.pull_item(i)
 
         x = Variable(im.unsqueeze(0))
         if args.cuda:
             x = x.cuda()
         _t['im_detect'].tic()
-        detections = net(x).data
+        scores, detections = net(x)
+        
+        detections = detections.data.cpu().numpy()
+        scores = scores.data.cpu().numpy()
+
         detect_time = _t['im_detect'].toc(average=False)
 
         # skip j = 0, because it's the background class
-        for j in range(1, detections.size(1)):
-            dets = detections[0, j, :]
-            mask = dets[:, 0].gt(0.).expand(5, dets.size(0)).t()
-            dets = torch.masked_select(dets, mask).view(-1, 5)
-            if dets.dim() == 0:
-                continue
-            boxes = dets[:, 1:]
+        for j in range(1, len(labelmap)+1):
+            inds = np.where(scores[:,j] > thresh)[0]
+            cls_scores = scores[inds,j]
+            boxes = detections[inds,:]
             boxes[:, 0] *= w
             boxes[:, 2] *= w
             boxes[:, 1] *= h
             boxes[:, 3] *= h
-            scores = dets[:, 0].cpu().numpy()
-            cls_dets = np.hstack((boxes.cpu().numpy(), scores[:, np.newaxis])) \
+            cls_dets = np.hstack((boxes, cls_scores[:, np.newaxis])) \
                 .astype(np.float32, copy=False)
             all_boxes[j][i] = cls_dets
-
+             
+            if 1:
+                vis_detections(im, str(i), cls_dets)
         print('im_detect: {:d}/{:d} {:.3f}s'.format(i + 1,
                                                     num_images, detect_time))
 
@@ -409,7 +432,8 @@ def evaluate_detections(box_list, output_dir, dataset):
 if __name__ == '__main__':
     # load net
     num_classes = len(VOC_CLASSES) + 1 # +1 background
-    net = build_ssd('test', 300, num_classes) # initialize SSD
+    #num_classes = 2
+    net = build_ssd('test', 300, 2) # initialize SSD
     net.load_state_dict(torch.load(args.trained_model))
     net.eval()
     print('Finished loading model!')

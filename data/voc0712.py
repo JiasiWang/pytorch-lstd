@@ -114,9 +114,9 @@ class VOCDetection(data.Dataset):
                 self.ids.append((rootpath, line.strip()))
 
     def __getitem__(self, index):
-        im, gt, h, w = self.pull_item(index)
-
-        return im, gt
+        im, gt, h, w, img_id, im_vis = self.pull_item(index)
+        # print(im.size(), gt.shape, h, w)
+        return im, gt, h, w, img_id, im_vis
 
     def __len__(self):
         return len(self.ids)
@@ -127,6 +127,7 @@ class VOCDetection(data.Dataset):
         target = ET.parse(self._annopath % img_id).getroot()
         img = cv2.imread(self._imgpath % img_id)
         height, width, channels = img.shape
+        im_vis = img
 
         if self.target_transform is not None:
             target = self.target_transform(target, width, height)
@@ -138,8 +139,8 @@ class VOCDetection(data.Dataset):
             img = img[:, :, (2, 1, 0)]
             # img = img.transpose(2, 0, 1)
             target = np.hstack((boxes, np.expand_dims(labels, axis=1)))
-        return torch.from_numpy(img).permute(2, 0, 1), target, height, width
-        # return torch.from_numpy(img), target, height, width
+        #return torch.from_numpy(img).permute(2, 0, 1), target, height, width, img_id
+        return torch.from_numpy(img).permute(2, 0, 1), target, height, width, img_id, im_vis
 
     def pull_image(self, index):
         '''Returns the original image object at index in PIL form
@@ -184,8 +185,7 @@ class VOCDetection(data.Dataset):
             tensorized version of img, squeezed
         '''
         return torch.Tensor(self.pull_image(index)).unsqueeze_(0)
-
-
+'''
 def detection_collate(batch):
     """Custom collate fn for dealing with batches of images that have a different
     number of associated object annotations (bounding boxes).
@@ -203,4 +203,28 @@ def detection_collate(batch):
     for sample in batch:
         imgs.append(sample[0])
         targets.append(torch.FloatTensor(sample[1]))
-    return torch.stack(imgs, 0), targets
+    return torch.stack(imgs, 0), targets, sample[2], sample[3]
+'''
+def detection_collate(batch):
+    """Custom collate fn for dealing with batches of images that have a different
+    number of associated object annotations (bounding boxes).
+
+    Arguments:
+        batch: (tuple) A tuple of tensor images and lists of annotations
+
+    Return:
+        A tuple containing:
+            1) (tensor) batch of images stacked on their 0 dim
+            2) (list of tensors) annotations for a given image are stacked on 0 dim
+    """
+    targets = []
+    imgs = []
+    imgs_id = []
+    im_vis = []
+    for sample in batch:
+        imgs.append(sample[0])
+        imgs_id.append(sample[4])
+        targets.append(torch.FloatTensor(sample[1]))
+        im_vis.append(sample[5])
+    return torch.stack(imgs, 0), targets, sample[2], sample[3], imgs_id, im_vis
+
