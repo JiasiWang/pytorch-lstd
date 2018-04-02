@@ -68,11 +68,12 @@ class MultiBoxLoss(nn.Module):
         for j in range(proposal.size(0)): 
             if cls_t[j]>0:
                 write_flag = True
-                cv2.rectangle(im, (int(proposal[j][0]*300), int(proposal[j][1]*300)), (int(proposal[j][2]*300), int(proposal[j][3]*300)),(255,0,0),2)   
-        
+                cv2.rectangle(im, (int(proposal[j][0]), int(proposal[j][1])), (int(proposal[j][2]), int(proposal[j][3])),(255,0,0),2)   
+                cv2.putText(im, str(cls_t[j]), (int(proposal[j][0]) + int((proposal[j][2] - proposal[j][0])/2) ,int(proposal[j][1]) + int((proposal[j][3] - proposal[j][1])/2)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255)) 
         if write_flag:
             cv2.imwrite('./vis/'+str(idx)+'.jpg', im)
-        
+            #cv2.imshow('./vis/'+str(idx)+'.jpg', im)
+             
     def forward(self, predictions, cls_predictions, proposal, targets, img, im_id, im_vis, h, w):
         """Multibox Loss
         Args:
@@ -105,8 +106,6 @@ class MultiBoxLoss(nn.Module):
         conf_t = torch.LongTensor(num, num_priors)
         cls_t = torch.LongTensor(num, 100)   
      
-        remove_record = torch.LongTensor(num, 100)
-        remove_record[:] = 0
         for idx in range(num):
             truths = targets[idx][:, :-1].data
             labels = targets[idx][:, -1].data
@@ -114,9 +113,6 @@ class MultiBoxLoss(nn.Module):
             the_proposal = proposal[idx].data[:,1:]
             #height, width, channel = im_vis[idx].shape
          
-            for i in range(the_proposal.size(0)):
-                if the_proposal[i][0]==0 and the_proposal[i][1]==0 and the_proposal[i][2]==0 and the_proposal[i][3]==0:
-                    remove_record[idx][i] = 1
             
             match(self.threshold, truths, defaults, self.variance, labels,
                   loc_t, conf_t, idx)
@@ -139,13 +135,12 @@ class MultiBoxLoss(nn.Module):
             conf_t = conf_t.cuda()
             conf_rpn = conf_rpn.cuda()
             cls_t = cls_t.cuda()
-            remove_record = remove_record.cuda()         
+
         # wrap targets
         loc_t = Variable(loc_t, requires_grad=False)
         conf_t = Variable(conf_t, requires_grad=False)
         conf_rpn = Variable(conf_rpn, requires_grad=False)
         cls_t = Variable(cls_t, requires_grad=False)
-        remove_record = Variable(remove_record, requires_grad=False)
 
         pos = conf_t > 0
         num_pos = pos.sum(dim=1, keepdim=True)
@@ -190,7 +185,6 @@ class MultiBoxLoss(nn.Module):
         cls_num_pos = cls_pos.sum(dim=1, keepdim=True)
 
         #filter extra proposal cls loss
-        #extra = remove_record > 0
            
         # Compute max conf across batch for hard negative mining
         batch_cls = cls_data.view(-1, 21)

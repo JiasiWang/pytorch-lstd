@@ -7,24 +7,9 @@ from data import v2
 import os
 #from layers.roi_pooling.roi_pool import RoIPoolFunction
 from layers.functions.post_rois import Post_rois
-from layers.roi_pooling import roi_pooling as _roi_pooling
-
-def roi_pooling(input, rois, size=(7,7), spatial_scale=1.0):
-    assert(rois.dim() == 2)
-    assert(rois.size(1) == 5)
-    output = []
-    rois = rois.data.float()
-    num_rois = rois.size(0)
-    
-    rois[:,1:].mul_(spatial_scale)
-    rois = rois.long()
-    for i in range(num_rois):
-        roi = rois[i]
-        im_idx = roi[0]
-        im = input.narrow(0, im_idx, 1)[..., roi[2]:(roi[4]+1), roi[1]:(roi[3]+1)]
-        output.append(F.adaptive_max_pool2d(im, size))
-
-    return torch.cat(output, 0)
+#from layers.roi_pooling import roi_pooling as _roi_pooling
+from lib.model.roi_pooling.modules.roi_pool import _RoIPooling
+import cv2
 
 class SSD(nn.Module):
     """Single Shot Multibox Architecture
@@ -44,7 +29,6 @@ class SSD(nn.Module):
     """
 
     def __init__(self, phase, base, extras, head, extras_lstd, num_classes):
-    #def __init__(self, phase, base, extras, head, num_classes):
         super(SSD, self).__init__()
         self.phase = phase
         self.num_classes = num_classes
@@ -61,20 +45,28 @@ class SSD(nn.Module):
 
         self.loc = nn.ModuleList(head[0])
         self.conf = nn.ModuleList(head[1])
-
+        '''
         self.extras_lstd = nn.ModuleList(extras_lstd)
         self.classifier = nn.ModuleList([nn.Linear(256*3*3, 21)])
-    
+        '''
+        self.classifier = nn.ModuleList([nn.Linear(1024 * 5 * 5, 4096),
+            nn.ReLU(True),
+            nn.Dropout(p = 0.5),
+            nn.Linear(4096, 4096),
+            nn.ReLU(True),
+            nn.Dropout(0.5),
+            nn.Linear(4096, 21)])
+
         self.softmax = nn.Softmax(dim=-1)
         self.post_rois = Post_rois(num_classes, 0, 100, 0, 0.65)
 
         self.detect = Detect(num_classes, 0, 100, 0, 0.65)
         #self.ROI_POOL = RoIPoolFunction(5, 5, 1.0/19.0)
-        self.roi_pooling = _roi_pooling       
+        #self.roi_pooling = _roi_pooling       
+        self.roi_pool = _RoIPooling(5, 5, 1.0/16.0)
 
 
-
-    def forward(self, x):
+    def forward(self, x, im_ids):
         """Applies network layers and ops on input image(s) x.
 
         Args:
@@ -93,11 +85,29 @@ class SSD(nn.Module):
                     2: localization layers, Shape: [batch,num_priors*4]
                     3: priorbox layers, Shape: [2,num_priors*4]
         """
+        def vis(img, rois, idx):
+            print(rois.size())
+            im = img.cpu().data
+            im = im.numpy()
+            im = im.transpose(1,2,0)
+            img = im[:, :, (2, 1, 0)]
+            im = img.copy()
+            #for i in range(decoded_boxes.size(0)):
+            for i in range(10):
+                write_flag = True
+                cv2.rectangle(im, (int(rois[i][1]), int(rois[i][2])),(int(rois[i][3]),int(rois[i][3])), (255,0,0),1)
+                #cv2.putText(im, str(confs[i]), (int(decoded_boxes[i][0]*300) + int((decoded_boxes[i][2]*300 - decoded_boxes[i][0]*300)/2) ,int(decoded_boxes[i][1]*300) + int((decoded_boxes[i][3]*300 - decoded_boxes[i][1]*300)/2)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255))
+            if write_flag:
+                cv2.imwrite('./vis/'+str(idx)+'.jpg', im)
+                #cv2.imshow('./vis/'+str(idx)+'.jpg', im)
+
+
+        img = x.clone()
+
         sources = list()
         loc = list()
         conf = list()
- 
-
+        
         # apply vgg up to conv4_3 relu
         for k in range(23):
             x = self.vgg[k](x)
@@ -123,55 +133,44 @@ class SSD(nn.Module):
 
         loc = torch.cat([o.view(o.size(0), -1) for o in loc], 1)
         conf = torch.cat([o.view(o.size(0), -1) for o in conf], 1)
-        '''
-        if self.phase == "test":
-            output = self.detect(
-                loc.view(loc.size(0), -1, 4),                   # loc preds
-                self.softmax(conf.view(conf.size(0), -1,
-                    self.num_classes)),                         # conf preds
-                self.priors.type(type(x.data))                  # default boxes
-            )
-        else:
-            output = (
-                loc.view(loc.size(0), -1, 4),
-                conf.view(conf.size(0), -1, self.num_classes),
-                self.priors
-            )
-        '''
         
         rpn_output = (
                 loc.view(loc.size(0), -1, 4),
                 conf.view(conf.size(0), -1, self.num_classes),
                 self.priors
         )
-        
-        rois = self.post_rois(
+        rois = self.post_rois(img,  
                 loc.view(loc.size(0), -1, 4),                   # loc preds
-                self.softmax(conf.view(conf.size(0), -1,
-                    self.num_classes)),                         # conf preds
+                conf.view(conf.size(0), -1, self.num_classes),                         # conf preds
                 self.priors.type(type(x.data))                  # default boxes
-            ) # rois.size (32,1,100,5) 5:
-      
-        rois = rois.contiguous().view(-1,5)
-        
-        proposal = rois.clone()
+        ) # rois.size (32,1,100,5) 5:
 
+        # print(conf.size()) (1, 8732*2)
+        rois = Variable(rois.data)
+        rois = rois.contiguous().view(-1,5)
         rois[:,1:] = rois[:,1:]*300
     
-        #x =  self.ROI_POOL(sources[1], rois)
-        x = self.roi_pooling(sources[1], rois, (5,5), 1.0/16.0)
+        x = self.roi_pool(sources[1], rois)
 
-        for k, v in enumerate(self.extras_lstd):
-            x = v(x)
+        #for k, v in enumerate(self.extras_lstd):
+        #    x = v(x)
       
         x = x.view(x.size(0), -1)
-        cls_output = self.classifier[0](x)
+        
+        for k, v in enumerate(self.classifier):
+             x = v(x)
+        
+        #cls_output = self.classifier[0](x)
 
         if self.phase == "train": 
-            return rpn_output, cls_output, proposal
+            return rpn_output, x, rois
         else:
-            return cls_output, proposal
-            #return rpn_output
+            
+            x = self.softmax(x.view(x.size(0), 21))
+            if 0:
+                for n_im in range(img.size(0)):
+                    vis(img[n_im],rois[n_im*100:(n_im*100 + 100)],n_im)
+            return x, rois
 
     def load_weights(self, base_file):
         other, ext = os.path.splitext(base_file)
@@ -183,6 +182,7 @@ class SSD(nn.Module):
             print('Finished!')
         else:
             print('Sorry only .pth and .pkl files supported.')
+
 
 
 # This function is derived from torchvision VGG make_layers()

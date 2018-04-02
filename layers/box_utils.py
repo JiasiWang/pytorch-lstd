@@ -134,18 +134,18 @@ def bbox_overlaps(boxes,query_boxes):
         )
         for n in range(N):
             iw = (
-                min(boxes[n, 2]*300, query_boxes[k, 2]*300) -
-                max(boxes[n, 0]*300, query_boxes[k, 0]*300) + 1
+                min(boxes[n, 2], query_boxes[k, 2]*300) -
+                max(boxes[n, 0], query_boxes[k, 0]*300) + 1
             )
             if iw > 0:
                 ih = (
-                    min(boxes[n, 3]*300, query_boxes[k, 3]*300) -
-                    max(boxes[n, 1]*300, query_boxes[k, 1]*300) + 1
+                    min(boxes[n, 3], query_boxes[k, 3]*300) -
+                    max(boxes[n, 1], query_boxes[k, 1]*300) + 1
                 )
                 if ih > 0:
                     ua = float(
-                        (boxes[n, 2]*300 - boxes[n, 0]*300 + 1) *
-                        (boxes[n, 3]*300 - boxes[n, 1]*300 + 1) +
+                        (boxes[n, 2] - boxes[n, 0] + 1) *
+                        (boxes[n, 3] - boxes[n, 1] + 1) +
                         box_area - iw * ih
                     )
                     overlaps[n, k] = iw * ih / ua
@@ -188,15 +188,32 @@ def match_proposal(threshold, img, truths, the_proposal, labels, cls_t, idx, h, 
 
   
 
-    #overlaps = bbox_overlaps(
+    overlaps = bbox_overlaps(
+        the_proposal,
+        truths
+    )
+    #overlaps = jaccard(
     #    truths,
     #    the_proposal
     #)
-    overlaps = jaccard(
-        truths,
-        the_proposal
-    )
+    
+    max_overlaps, gt_assignment = overlaps.max(1,keepdim=True)
+    best_prior_overlap, best_prior_idx = overlaps.max(0, keepdim=True)
+   
+    best_prior_idx.squeeze_(0) 
+    gt_assignment.squeeze_(1)
+    
+    
+    cls_labels = labels[gt_assignment] + 1
+    cls_labels[max_overlaps < threshold] = 0
 
+    for j in range(best_prior_idx.size(0)):
+        cls_labels[best_prior_idx[j]] = labels[j]+1
+
+    cls_t[idx] = cls_labels
+
+
+    '''
     best_prior_overlap, best_prior_idx = overlaps.max(1, keepdim=True)
     # print('best_prior_idx: ',best_prior_idx.size()) #(n,1)
     # [1,num_priors] best ground truth for each prior
@@ -217,7 +234,7 @@ def match_proposal(threshold, img, truths, the_proposal, labels, cls_t, idx, h, 
     conf = labels[best_truth_idx] + 1         # Shape: [num_priors]
     conf[best_truth_overlap < threshold] = 0  # label as background
     cls_t[idx] = conf  # [num_priors] top class label for each prior
-
+    '''
 
 def encode(matched, priors, variances):
     """Encode the variances from the priorbox layers into the ground truth boxes

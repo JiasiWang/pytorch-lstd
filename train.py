@@ -1,3 +1,4 @@
+#import _init_paths
 import os
 import torch
 import torch.nn as nn
@@ -14,10 +15,11 @@ from ssd import build_ssd
 import numpy as np
 import time
 
+'''
 import os
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"]="1"
-
+'''
 
 def str2bool(v):
     return v.lower() in ("yes", "true", "t", "1")
@@ -104,17 +106,17 @@ def weights_init(m):
         xavier(m.weight.data)
         m.bias.data.zero_()
 
-
+'''
 if not args.resume:
     print('Initializing weights...')
     # initialize newly added layers' weights with xavier method
     ssd_net.extras.apply(weights_init)
     ssd_net.loc.apply(weights_init)
     ssd_net.conf.apply(weights_init)
-    ssd_net.extras_lstd.apply(weights_init)
+    #ssd_net.extras_lstd.apply(weights_init)
     ssd_net.classifier.apply(weights_init)
-
 '''
+
 if args.resume:
     print('Resuming training, loading {}...'.format(args.resume))
     model_dict = ssd_net.state_dict()
@@ -124,10 +126,10 @@ if args.resume:
     model_dict.update(pretrained_dict) 
     # 3. load the new state dict
     ssd_net.load_state_dict(model_dict)
-    ssd_net.extras_lstd.apply(weights_init)
+    #ssd_net.extras_lstd.apply(weights_init)
     ssd_net.classifier.apply(weights_init)
     print('Loading base network...')
-'''
+
 optimizer = optim.SGD(net.parameters(), lr=args.lr,
                       momentum=args.momentum, weight_decay=args.weight_decay)
 criterion = MultiBoxLoss(num_classes, 0.5, True, 0, True, 3, 0.5, False, args.cuda)
@@ -143,6 +145,8 @@ def train():
 
     dataset = VOCDetection(args.voc_root, train_sets, SSDAugmentation(
         ssd_dim, means), AnnotationTransform())
+
+    #dataset = VOCDetection(args.voc_root, train_sets, None, AnnotationTransform())
 
     epoch_size = len(dataset) // args.batch_size
     print('Training SSD on', dataset.name)
@@ -207,7 +211,7 @@ def train():
         # forward
         t0 = time.time()
         #out, cls_out = net(images)
-        out, cls_output, proposal= net(images)
+        out, cls_output, proposal= net(images, im_ids)
          
         #print(images.size()) 32, 3, 300, 300
         
